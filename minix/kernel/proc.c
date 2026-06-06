@@ -41,6 +41,10 @@
 
 #include <minix/syslib.h>
 
+// Adicao para Algoritmo Loteria
+#include <minix/config.h>
+
+#define DEFAULT_TICKETS  10
 /* Scheduling and message passing functions */
 static void idle(void);
 /**
@@ -59,6 +63,14 @@ static int try_one(endpoint_t receive_e, struct proc *src_ptr,
 	struct proc *dst_ptr);
 static struct proc * pick_proc(void);
 static void enqueue_head(struct proc *rp);
+
+//Função de número aleaório
+static unsigned long lottery_seed = 12345UL;
+
+static int lottery_rand(int total) {
+    lottery_seed = lottery_seed * 1103515245UL + 12345UL;
+    return (int)((lottery_seed >> 16) % (unsigned long)total) + 1;
+}
 
 /* all idles share the same idle_priv structure */
 static struct priv idle_priv;
@@ -133,6 +145,7 @@ void proc_init(void)
 		rp->p_endpoint = _ENDPOINT(0, rp->p_nr); /* generation no. 0 */
 		rp->p_scheduler = NULL;		/* no user space scheduler */
 		rp->p_priority = 0;		/* no priority */
+		rp->p_tickets = DEFAULT_TICKETS;
 		rp->p_quantum_size_ms = 0;	/* no quantum size */
 
 		/* arch-specific initialization */
@@ -1784,31 +1797,56 @@ void dequeue(struct proc *rp)
  *===========================================================================*/
 static struct proc * pick_proc(void)
 {
-/* Decide who to run now.  A new process is selected and returned.
- * When a billable process is selected, record it in 'bill_ptr', so that the 
- * clock task can tell who to bill for system time.
- *
- * This function always uses the run queues of the local cpu!
- */
-  register struct proc *rp;			/* process to run */
+  register struct proc *rp;
   struct proc **rdy_head;
-  int q;				/* iterate over queues */
+  int q;
 
-  /* Check each of the scheduling queues for ready processes. The number of
-   * queues is defined in proc.h, and priorities are set in the task table.
-   * If there are no processes ready to run, return NULL.
-   */
   rdy_head = get_cpulocal_var(run_q_head);
-  for (q=0; q < NR_SCHED_QUEUES; q++) {	
-	if(!(rp = rdy_head[q])) {
-		TRACE(VF_PICKPROC, printf("cpu %d queue %d empty\n", cpuid, q););
-		continue;
-	}
-	assert(proc_is_runnable(rp));
-	if (priv(rp)->s_flags & BILLABLE)	 	
-		get_cpulocal_var(bill_ptr) = rp; /* bill for system time */
-	return rp;
+
+  /* Verificar se há processos de usuário prontos */
+  int has_user = 0;
+  for (q = USER_Q; q < NR_SCHED_QUEUES; q++) {
+    if (rdy_head[q]) {
+      has_user = 1;
+      break;
+    }
   }
+
+  /* Se não há processos de usuário, comportamento original */
+  if (!has_user) {
+    for (q = 0; q < NR_SCHED_QUEUES; q++) {
+      if (!(rp = rdy_head[q])) continue;
+      assert(proc_is_runnable(rp));
+      if (priv(rp)->s_flags & BILLABLE)
+        get_cpulocal_var(bill_ptr) = rp;
+      return rp;
+    }
+    return NULL;
+  }
+
+  /* Somar total de bilhetes dos processos de usuário */
+  int total_tickets = 0;
+  for (q = USER_Q; q < NR_SCHED_QUEUES; q++) {
+    for (rp = rdy_head[q]; rp != NULL; rp = rp->p_nextready) {
+      total_tickets += rp->p_tickets;
+    }
+  }
+
+  /* Sortear e selecionar o vencedor */
+  int winning = lottery_rand(total_tickets);
+  int count = 0;
+  for (q = USER_Q; q < NR_SCHED_QUEUES; q++) {
+    for (rp = rdy_head[q]; rp != NULL; rp = rp->p_nextready) {
+      count += rp->p_tickets;
+      if (count >= winning) {
+        assert(proc_is_runnable(rp));
+        if (priv(rp)->s_flags & BILLABLE)
+          get_cpulocal_var(bill_ptr) = rp;
+        return rp;
+      }
+    }
+  }
+
   return NULL;
 }
 
